@@ -13,6 +13,7 @@ import org.spongepowered.api.Sponge;
 import org.spongepowered.api.block.tileentity.carrier.Chest;
 import org.spongepowered.api.block.trait.BooleanTraits;
 import org.spongepowered.api.data.key.Keys;
+import org.spongepowered.api.entity.Entity;
 import org.spongepowered.api.entity.EntityTypes;
 import org.spongepowered.api.entity.Item;
 import org.spongepowered.api.entity.living.ArmorStand;
@@ -40,8 +41,11 @@ public class ChestShop {
     private Item display;
     private ArmorStand title;
     private ArmorStand description;
+    private ArmorStand description1;
     private Location<World> location;
     private double price;
+    private double buyPrice;
+    private boolean admin;
 
     public ChestShop(Chest chest, UUID owner, double price) {
         this.chest = chest;
@@ -66,6 +70,7 @@ public class ChestShop {
         for (NBTBase stack : stacks) {
             shop.contents.add((ItemStack)(Object)new net.minecraft.item.ItemStack((NBTTagCompound) stack));
         }
+        shop.setAdmin(nbt.hasKey("admin") && nbt.getBoolean("admin"));
         return shop;
     }
 
@@ -77,6 +82,7 @@ public class ChestShop {
         nbt.setInteger("z", location.getBlockZ());
         nbt.setUniqueId("owner", owner);
         nbt.setDouble("price", price);
+        nbt.setBoolean("admin", admin);
         NBTTagList list = new NBTTagList();
         for (ItemStack content : contents) {
             list.appendTag(((net.minecraft.item.ItemStack) (Object) content).writeToNBT(new NBTTagCompound()));
@@ -91,7 +97,11 @@ public class ChestShop {
             entityChest.getWorld().addBlockEvent(new BlockPos(location.getX(), location.getY(), location.getZ()), entityChest.getBlockType(), 1, 1);
         open = true;
         if (title == null) {
-            title = (ArmorStand)  location.getExtent().createEntity(EntityTypes.ARMOR_STAND, location.getPosition().add(.5, 1.5, .5));
+            location.getExtent().getNearbyEntities(location.getPosition().add(.5, buyPrice > 0 ? 1.75 : 1.5, .5), .1)
+                    .stream()
+                    .filter(e -> e instanceof ArmorStand)
+                    .forEach(Entity::remove);
+            title = (ArmorStand)  location.getExtent().createEntity(EntityTypes.ARMOR_STAND, location.getPosition().add(.5, buyPrice > 0 ? 1.75 : 1.5, .5));
             title.offer(Keys.INVISIBLE, true);
             title.offer(Keys.HAS_GRAVITY, false);
             title.offer(Keys.INFINITE_DESPAWN_DELAY, true);
@@ -115,15 +125,34 @@ public class ChestShop {
                 location.getExtent().spawnEntity(display);
             }
             if (description == null) {
-                description = (ArmorStand)  location.getExtent().createEntity(EntityTypes.ARMOR_STAND, location.getPosition().add(.5, 1.25, .5));
+                location.getExtent().getNearbyEntities(location.getPosition().add(.5, buyPrice > 0 ? 1.5 : 1.25, .5), .1)
+                        .stream()
+                        .filter(e -> e instanceof ArmorStand)
+                        .forEach(Entity::remove);
+                description = (ArmorStand)  location.getExtent().createEntity(EntityTypes.ARMOR_STAND, location.getPosition().add(.5, buyPrice > 0 ? 1.5 : 1.25, .5));
                 description.offer(Keys.INVISIBLE, true);
                 description.offer(Keys.HAS_GRAVITY, false);
                 description.offer(Keys.INFINITE_DESPAWN_DELAY, true);
                 description.offer(Keys.CUSTOM_NAME_VISIBLE, true);
                 description.offer(Keys.ARMOR_STAND_MARKER, true);
                 String price = (getPrice()+"").replaceAll("[.]0.*", "");
-                description.offer(Keys.DISPLAY_NAME, TextSerializers.FORMATTING_CODE.deserialize("&7Price: &e"+price+" &8|&7 Available: &a"+getContents().stream().mapToInt(ItemStack::getQuantity).sum()));
+                description.offer(Keys.DISPLAY_NAME, TextSerializers.FORMATTING_CODE.deserialize("&7Price: &e"+price+(admin ? "" : " &8|&7 Available: &a"+getContents().stream().mapToInt(ItemStack::getQuantity).sum())));
                 location.getExtent().spawnEntity(description);
+            }
+            if (description1 == null && buyPrice > 0) {
+                location.getExtent().getNearbyEntities(location.getPosition().add(.5, 1.25, .5), .1)
+                        .stream()
+                        .filter(e -> e instanceof ArmorStand)
+                        .forEach(Entity::remove);
+                description1 = (ArmorStand)  location.getExtent().createEntity(EntityTypes.ARMOR_STAND, location.getPosition().add(.5, 1.25, .5));
+                description1.offer(Keys.INVISIBLE, true);
+                description1.offer(Keys.HAS_GRAVITY, false);
+                description1.offer(Keys.INFINITE_DESPAWN_DELAY, true);
+                description1.offer(Keys.CUSTOM_NAME_VISIBLE, true);
+                description1.offer(Keys.ARMOR_STAND_MARKER, true);
+                String price = (getBuyPrice()+"").replaceAll("[.]0.*", "");
+                description1.offer(Keys.DISPLAY_NAME, TextSerializers.FORMATTING_CODE.deserialize("&7Sell to for: &e"+price));
+                location.getExtent().spawnEntity(description1);
             }
         }
     }
@@ -145,6 +174,10 @@ public class ChestShop {
             description.remove();
             description = null;
         }
+        if (description1 != null) {
+            description1.remove();
+            description1 = null;
+        }
     }
 
     public void update() {
@@ -157,6 +190,9 @@ public class ChestShop {
         if (description != null)
             description.remove();
         description = null;
+        if (description1 != null)
+            description1.remove();
+        description1 = null;
     }
 
     public Set<ItemStack> getContents() {
@@ -221,5 +257,21 @@ public class ChestShop {
 
     public Item getDisplay() {
         return display;
+    }
+
+    public double getBuyPrice() {
+        return buyPrice;
+    }
+
+    public void setBuyPrice(double buyPrice) {
+        this.buyPrice = buyPrice;
+    }
+
+    public void setAdmin(boolean admin) {
+        this.admin = admin;
+    }
+
+    public boolean isAdmin() {
+        return admin;
     }
 }

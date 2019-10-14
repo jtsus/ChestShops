@@ -1,6 +1,7 @@
 package net.eterniamc.chestshops;
 
 import com.flowpowered.math.vector.Vector3i;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.inject.Inject;
@@ -13,7 +14,6 @@ import net.minecraftforge.common.util.Constants;
 import org.slf4j.Logger;
 import org.spongepowered.api.Sponge;
 import org.spongepowered.api.block.BlockSnapshot;
-import org.spongepowered.api.block.BlockState;
 import org.spongepowered.api.block.BlockType;
 import org.spongepowered.api.block.BlockTypes;
 import org.spongepowered.api.block.tileentity.TileEntity;
@@ -26,14 +26,13 @@ import org.spongepowered.api.data.key.Keys;
 import org.spongepowered.api.data.type.HandTypes;
 import org.spongepowered.api.entity.living.player.Player;
 import org.spongepowered.api.entity.living.player.User;
+import org.spongepowered.api.event.Order;
 import org.spongepowered.api.event.block.ChangeBlockEvent;
 import org.spongepowered.api.event.block.InteractBlockEvent;
-import org.spongepowered.api.event.block.tileentity.TargetTileEntityEvent;
 import org.spongepowered.api.event.cause.Cause;
 import org.spongepowered.api.event.cause.EventContext;
 import org.spongepowered.api.event.filter.cause.First;
 import org.spongepowered.api.event.filter.cause.Root;
-import org.spongepowered.api.event.game.state.GameInitializationEvent;
 import org.spongepowered.api.event.game.state.GameStartedServerEvent;
 import org.spongepowered.api.event.Listener;
 import org.spongepowered.api.event.game.state.GameStoppingServerEvent;
@@ -58,13 +57,14 @@ import org.spongepowered.api.util.Direction;
 import org.spongepowered.api.util.Tristate;
 import org.spongepowered.api.util.blockray.BlockRay;
 import org.spongepowered.api.util.blockray.BlockRayHit;
-import org.spongepowered.api.world.Location;
 import org.spongepowered.api.world.World;
 
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -78,15 +78,18 @@ import java.util.function.Consumer;
 )
 public class ChestShops {
     private static final File file = new File("./config/chestShops.nbt");
-    private static Map<Vector3i, ChestShop> shops = Maps.newHashMap();
+    private static final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+    private static Map<Vector3i, ChestShop> shops = Maps.newConcurrentMap();
     private Map<UUID, Consumer<Text>> chatGuis = Maps.newHashMap();
     private EconomyService es;
+    private Object plugin;
 
     @Inject
     private Logger logger;
 
     @Listener
     public void onServerStart(GameStartedServerEvent event) {
+        plugin = this;
         es = Sponge.getServiceManager().provide(EconomyService.class).orElseThrow(()-> new Error("Economy service not found!"));
         if (file.exists()) {
             try {
@@ -102,36 +105,36 @@ public class ChestShops {
                 e.printStackTrace();
             }
         }
-        Task.builder()
-                .intervalTicks(2)
-                .execute(() -> {
-                    Map<Vector3i, ChestShop> copy = Maps.newHashMap();
-                    copy.putAll(shops);
-                    Collection<ChestShop> close = copy.values();
-                    Collection<ChestShop> open = Sets.newHashSet();
-                    for (Player player : Sponge.getServer().getOnlinePlayers()) {
-                        BlockRay<World> ray = BlockRay.from(player)
-                                .distanceLimit(6)
-                                .build();
-                        while (ray.hasNext()) {
-                            BlockRayHit<World> hit = ray.next();
-                            if (copy.containsKey(hit.getBlockPosition())) {
-                                ChestShop shop = copy.get(hit.getBlockPosition());
-                                if (shop.getLocation().getExtent().getName().equals(player.getWorld().getName())) {
-                                    open.add(shop);
-                                    close.remove(shop);
-                                }
-                                break;
+        executor.scheduleAtFixedRate(() -> {
+            Map<Vector3i, ChestShop> copy = Maps.newHashMap(shops);
+            Collection<ChestShop> close = copy.values();
+            Collection<ChestShop> open = Sets.newHashSet();
+            for (Player player : Sponge.getServer().getOnlinePlayers()) {
+                try {
+                    BlockRay<World> ray = BlockRay.from(player)
+                            .distanceLimit(5)
+                            .narrowPhase(false)
+                            .build();
+                    while (ray.hasNext()) {
+                        BlockRayHit<World> hit = ray.next();
+                        if (copy.containsKey(hit.getBlockPosition())) {
+                            ChestShop shop = copy.get(hit.getBlockPosition());
+                            if (shop.getLocation().getExtent().getName().equals(player.getWorld().getName())) {
+                                close.remove(shop);
+                                open.add(shop);
                             }
+                            break;
                         }
                     }
-                    Task.builder().execute(()-> {
-                        open.forEach(ChestShop::open);
-                        close.forEach(ChestShop::close);
-                    }).submit(this);
-                })
-                .async()
-                .submit(this);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            Task.builder().execute(() -> {
+                close.forEach(ChestShop::close);
+                open.forEach(ChestShop::open);
+            }).submit(plugin);
+        }, 0, 250, TimeUnit.MILLISECONDS);
         Task.builder()
                 .interval(5, TimeUnit.MINUTES)
                 .execute(this::save)
@@ -169,7 +172,7 @@ public class ChestShops {
         for (Transaction<BlockSnapshot> transaction : event.getTransactions()) {
             if (transaction.getDefault().getState().getType() instanceof BlockChest) {
                 net.minecraft.item.ItemStack na = (net.minecraft.item.ItemStack) (Object) player.getItemInHand(HandTypes.MAIN_HAND).get();
-                if (na.hasTagCompound() && na.getTagCompound().hasKey("ChestShop")) {
+                if (na.getTagCompound() != null && na.getTagCompound().hasKey("ChestShop")) {
                     Optional<TileEntity> tile = player.getWorld().getTileEntity(transaction.getDefault().getPosition());
                     if (tile.isPresent() && tile.get() instanceof Chest) {
                         Chest c = (Chest) tile.get();
@@ -187,11 +190,31 @@ public class ChestShops {
                                     player.getUniqueId(),
                                     Double.parseDouble(text.toPlain().replaceAll("[^0-9.]*", ""))
                             );
+                            /*sendMessage(player, "Enter the sell price for this shop so players can sell their items to it, enter 0 to disable");
+                            chatGuis.put(player.getUniqueId(), text1 -> {
+                                shop.setBuyPrice(Double.parseDouble(text.toPlain().replaceAll("[^0-9.]*", "")));
+                                ChestShop old = shops.put(chest.getLocation().getBlockPosition(), shop);
+                                if (old != null)
+                                    old.close();
+                                sendMessage(player, "Your chest shop has been created! Right click it with an item stack to" +
+                                        " add it to your shop " +
+                                        "and right click with an empty hand to remove a stack from your shop");
+                            });*/
+                            if (player.hasPermission("chestshop.admin")) {
+                                sendMessage(player, Text.builder()
+                                        .append(TextSerializers.FORMATTING_CODE.deserialize("You have the ability to make this chest shop an Admin Shop, click &aHERE&f to do so"))
+                                        .onClick(TextActions.executeCallback(src -> {
+                                            shop.setAdmin(true);
+                                            sendMessage(src, "The shop has been updated");
+                                        }))
+                                        .onHover(TextActions.showText(Text.of("Making this an admin shop will make it have an infinite quantity of whatever item is put in")))
+                                        .build()
+                                );
+                            }
                             ChestShop old = shops.put(chest.getLocation().getBlockPosition(), shop);
                             if (old != null)
                                 old.close();
-                            sendMessage(player, "Your chest shop has been created! Right click it with an item stack to add it to your shop " +
-                                    "and right click with an empty hand to remove a stack from your shop");
+                            sendMessage(player, "Your chest shop has been created! Right click it with an item stack to add it to your shop and right click with an empty hand to remove a stack from your shop");
                         });
                         return;
                     }
@@ -224,10 +247,10 @@ public class ChestShops {
             if (shop.getLocation().getExtent().getName().equals(player.getWorld().getName())) {
                 event.setUseBlockResult(Tristate.FALSE);
                 event.setUseItemResult(Tristate.FALSE);
+                ItemStack stack = shop.getContents().isEmpty() ? null : shop.getContents().iterator().next();
                 if (shop.getOwner().equals(player.getUniqueId())) {
                     Optional<ItemStack> held = player.getItemInHand(HandTypes.MAIN_HAND);
                     if (held.isPresent() && held.get().getType() != ItemTypes.AIR) {
-                        ItemStack stack = shop.getContents().isEmpty() ? null : shop.getContents().iterator().next();
                         if (stack == null || stack.getType() == held.get().getType() && stack.getValues().equals(held.get().getValues())) {
                             shop.add(held.get());
                             shop.update();
@@ -245,6 +268,21 @@ public class ChestShops {
                     } else {
                         sendMessage(player, "This chest shop is empty!");
                     }
+                } else if (stack != null && shop.getBuyPrice() > 0 && player.getItemInHand(HandTypes.MAIN_HAND).map(held -> stack.getType() == held.getType() && stack.getValues().equals(held.getValues())).orElse(false)) {
+                    Optional<ItemStack> held = player.getItemInHand(HandTypes.MAIN_HAND);
+                    double amount = shop.getBuyPrice() * held.get().getQuantity();
+                    player.sendMessage(
+                            Text.builder()
+                                    .append(TextSerializers.FORMATTING_CODE.deserialize("&6&lChest Shops &7&l>&f This will sell for " + amount + ", click &aHERE&f to confirm"))
+                                    .onClick(TextActions.executeCallback(src -> {
+                                        if (withdraw(getUser(shop.getOwner()), amount)) {
+                                            deposit(player, amount);
+                                            shop.add(held.get());
+                                            player.setItemInHand(HandTypes.MAIN_HAND, ItemStack.empty());
+                                        }
+                                    }))
+                                    .build()
+                    );
                 } else if (shop.sumContents() > 1) {
                     sendMessage(player, "How many of these would you like to buy? (Enter the amount in chat)");
                     chatGuis.put(player.getUniqueId(), text -> {
@@ -299,7 +337,7 @@ public class ChestShops {
         event.setCancelled(shops.values().stream().anyMatch(s -> s.getDisplay() == event.getTargetEntity()));
     }
 
-    @Listener
+    @Listener(order = Order.PRE)
     public void onServerStopping(GameStoppingServerEvent event) {
         Sponge.getScheduler().getScheduledTasks(this).forEach(Task::cancel);
         shops.values().forEach(ChestShop::close);
@@ -311,17 +349,38 @@ public class ChestShops {
         shops.values().forEach(shop -> list.appendTag(shop.writeToNbt()));
         NBTTagCompound nbt = new NBTTagCompound();
         nbt.setTag("shops", list);
+        File backup = new File("./config/chestShops.back");
         try {
             if (!file.exists())
                 file.createNewFile();
             CompressedStreamTools.write(nbt, file);
         } catch (IOException e) {
-            e.printStackTrace();
+            logger.error("Error while saving chest shop data", e);
+            try {
+                if (backup.exists()) {
+                    if (file.exists())
+                        file.delete();
+                    backup.renameTo(file);
+                }
+            } catch(Exception e1) {
+                logger.error("Error while restoring to backup", e1);
+            }
+        }
+        try {
+            if (!backup.exists())
+                backup.createNewFile();
+            CompressedStreamTools.write(nbt, backup);
+        } catch (IOException e) {
+            logger.error("Error while saving backup chest shop data", e);
         }
     }
 
     private void sendMessage(MessageReceiver receiver, String text) {
-        receiver.sendMessage(TextSerializers.FORMATTING_CODE.deserialize("&6&lChest Shops &7&l>&f "+text));
+        sendMessage(receiver, TextSerializers.FORMATTING_CODE.deserialize(text));
+    }
+
+    private void sendMessage(MessageReceiver receiver, Text text) {
+        receiver.sendMessage(Text.join(TextSerializers.FORMATTING_CODE.deserialize("&6&lChest Shops &7&l>&f "),text));
     }
 
     private boolean withdraw(User user, double amount) {
